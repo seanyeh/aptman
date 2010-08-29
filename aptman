@@ -1,0 +1,833 @@
+
+#!/usr/bin/env python
+# 
+# aptman -- a simple wrapper for Debian's Advanced Packaging Tool
+# Copyright (C) 2009  Sean Yeh <snoblo AT archlinux DOT us>
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+
+import logging
+import optparse
+import os
+import signal
+import stat
+import subprocess
+import sys
+import time 
+import traceback
+
+from textwrap import TextWrapper
+from threading import Thread
+
+
+DEFAULT_PREFS='''#!/usr/bin/env python
+
+#simple configuration file - edit to your needs
+
+APT_ARCHIVE_DIR = "/var/cache/apt/archives/"
+APT_ARCHIVE_PARTIAL_DIR = "/var/cache/apt/archives/partial/"
+
+
+# Choose the frontend for debconf, which may be called
+# upon when installing certain packages.
+#
+# Aptman (so far) only works with "gnome", "kde", or "noninteractive"
+# "editor" may also work if your system's default editor has a GUI.
+# If running without X, use "noninteractive"
+# See the debconf manpages for details.
+DEBIAN_FRONTEND_ENV = 'sudo env DEBIAN_FRONTEND="gnome"'
+
+#Install/Remove commands
+#Do not need sudo because sudo is already part of DEBIAN_FRONTEND_ENV
+INSTALL_CMD = DEBIAN_FRONTEND_ENV + " apt-get install --yes --force-yes "
+REMOVE_CMD = DEBIAN_FRONTEND_ENV + " apt-get remove --yes --force-yes "
+UPGRADE_CMD = DEBIAN_FRONTEND_ENV + " apt-get upgrade --yes --force-yes "
+
+#To search for packages that only contain ALL 
+#search terms, then change it to True
+SEARCH_ALL_TERMS = False
+
+
+# ansi color codes
+
+COL_DEFAULT="\033[1;0m"
+COL_BOLD="\033[1;1m"
+
+COL_INVERSE_ON="\033[1;7m"
+COL_INVERSE_OFF="\033[1;27m"
+
+COL_WHITE="\033[1;37m"
+COL_YELLOW="\033[1;33m"
+COL_RED="\033[1;31m"
+COL_CYAN="\033[1;36m"
+COL_GREEN="\033[1;32m"
+COL_PINK="\033[1;35m"
+COL_BLUE="\033[1;34m"
+COL_BLACK="\033[1;30m"
+COL_MAGENTA="\033[1;35m"
+
+
+# Feel free to use your own colors
+
+COL_NUMBER = COL_INVERSE_ON
+COL_PKGNAME = COL_GREEN
+COL_VERSION = COL_CYAN
+COL_INSTALLED = COL_YELLOW
+COL_DESCRIPTION = COL_DEFAULT
+COL_INSTALLED_VERSION = COL_RED
+
+COL_HEADER = COL_BOLD
+COL_ARROW = COL_YELLOW
+'''
+
+APTMAN_DESCRIPTION = '''
+Aptman is a simple wrapper for Debian's Advanced Packaging Tool 
+featuring visually attractive output and an interactive mode, 
+inspired by the Pacman package manager and Yaourt front-end 
+from the Arch Linux distribution.'''
+
+APTMAN_VERSION = '''
+aptman - version 0.1.0
+Copyright (C) 2009  Sean Yeh <snoblo AT archlinux DOT us>
+This program comes with ABSOLUTELY NO WARRANTY; for details
+use option --license. This is free software, and you are welcome 
+to redistribute it under certain conditions.'''
+
+APTMAN_LICENSE = '''
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.'''
+
+
+FIRST_RUN_MESSAGE = '''
+Config directory not found - assuming this is the first run.
+Before using aptman, make sure to run: sudo visudo
+    and add this line (replacing USER with your username):
+    USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get,/usr/bin/env
+Alternatively, you can simply run aptman with root privileges.
+
+Now creating config file prefs.py in ~/.aptman
+'''
+
+#like enums in C
+[MODE_NONE,MODE_DOWNLOADING,MODE_PRECONFIGURING,MODE_SELECTING,
+MODE_PROCESSING,MODE_SETTING,MODE_DONE,MODE_REMOVING]=range(8)
+
+
+
+#Default preferences directory: ~/.aptman/
+PREFS_DIR = os.path.expanduser('~/.aptman')
+if not os.path.isdir(PREFS_DIR):
+    print FIRST_RUN_MESSAGE
+    os.mkdir(PREFS_DIR)
+if not os.path.isfile(PREFS_DIR+"/prefs.py"):
+    print "Could not find prefs.py. Created default config file"
+    f = open(PREFS_DIR+"/prefs.py", 'w')
+    f.write(DEFAULT_PREFS)
+    f.close()
+    
+sys.path.append(PREFS_DIR)
+import prefs
+
+LOG_FILENAME = PREFS_DIR+'/log'
+        
+#----------------------------------------------------------------------
+# Main
+def main():
+    
+    usage = "usage: %prog [options] [search_term(s)]\n" + APTMAN_DESCRIPTION
+    
+    parser = optparse.OptionParser(usage)
+    search_options = optparse.OptionGroup(parser, 'Search Options (Default)')
+    other_options = optparse.OptionGroup(parser, 'Other Options')  
+    
+
+    parser.add_option("-v","--version", action="store_true", dest="version",
+        help="output version information")
+    parser.add_option("-l","--license", action="store_true", dest="license",
+        help="output license information")
+    
+    search_options.add_option("-n", default=False, action="store_true", dest="name",
+        help="search only for packages matching the name")        
+    search_options.add_option("-a", "--and", default=prefs.SEARCH_ALL_TERMS,
+        action="store_true", dest="search_all_terms",
+        help="AND - given multiple search terms, will only search for packages matching all terms. Do not use with -o.")
+    search_options.add_option("-o","--or",
+        action="store_false", dest="search_all_terms",
+        help="OR - given multiple search terms, will only search for packages matching any of the terms (default). Do not use with -a.")    
+    
+    
+    other_options.add_option("-i","--install",default=False,
+        action="store_true",dest="install",
+        help="Install package(s). No other options are used.")
+    other_options.add_option("-r","--remove",default=False,
+        action="store_true",dest="remove",
+        help="Remove package(s). No other options are used.")
+    other_options.add_option("-u","--upgrade",default=False,
+        action="store_true",dest="upgrade",
+        help="Upgrade all packages in system. No other options are used.")
+    
+    
+    parser.add_option_group(search_options)
+    parser.add_option_group(other_options)
+    
+    (options, args) = parser.parse_args()
+    
+    
+    # Option parsing
+    logging.debug("options:" + str(options))
+    logging.debug("args:" + str(args))
+
+    if options.license: license()
+    if options.version: version()
+
+    if options.install or options.remove:
+        pkgs=""
+        for a in args:
+            pkgs += a + " "
+        
+        if options.install:
+            install(pkgs.strip())
+        else:
+            remove(pkgs.strip())
+            
+    elif options.upgrade:
+        upgrade()
+        
+    elif len(args)>0:
+        default_search(args,options)
+    else:
+        parser.print_help()
+        
+# end main        
+#----------------------------------------------------------------------
+
+def print_multiline(text):
+    tw = TextWrapper(width=terminal_size()[1])
+    
+    for t in tw.wrap(text.strip()):
+        print t
+
+def license():
+    print APTMAN_LICENSE
+    exit()
+    
+def version():
+    #print_multiline(APTMAN_VERSION)
+    print APTMAN_VERSION
+    exit()
+    
+def help():
+    usage()
+    
+def usage(msg=""):  
+    print msg
+    print APTMAN_USAGE
+    #print_multiline(APTMAN_DESCRIPTION)
+    print APTMAN_DESCRIPTION
+    version()
+    exit()
+
+#----------------------------------------------------------------------
+# display hacks :)
+class displaythread(Thread):
+    def __init__ (self):
+        Thread.__init__(self)
+        self.__stopped__=False
+        self.__threads__=[] #change name later - it sucks
+    def run(self):        
+        print ""
+        while not self.__stopped__:         
+            
+            index=0
+            for t in self.__threads__:
+                speed=t.get_dl_size()/(time.time()-t.get_start_time())
+                display_percentage(t.get_pkg_name(), t.get_percentage(), t.get_dl_size(), speed)                
+                
+                if t.get_percentage()==100:
+                    
+                    for i in range(0,index): #for downloads before the finished one that is not done yet - move the finished up one top
+                        logging.debug(t.get_pkg_name()+" done - cursor moving up")
+                        cursor_up()
+                    display_percentage(t.get_pkg_name(), t.get_percentage(), t.get_dl_size(), speed) #display hack - don't need to update speed (use prev)
+                    
+                    for i in range(0,len(self.__threads__)):
+                        logging.debug(t.get_pkg_name()+" done - cursor moving down")
+                        sys.stdout.write("\n")
+                        
+                    self.__threads__.remove(t)
+                    
+                    break
+
+                sys.stdout.write("\n")                
+                index+=1
+            #-----------------end for loop  
+            
+            for i in range(0,len(self.__threads__)):
+                cursor_up()
+                
+            time.sleep(.1) #update display every .1 second? probably good enough?
+            
+    def stop(self):
+        logging.debug("displaythread stopping")
+        self.__stopped__=True
+    def add(self,t):
+        logging.debug("##INADD")
+        temp=self.__threads__[:] #need the colon thing to make it copy by value not ref ONLY FOR REMOVING STUFF
+        logging.debug("temp: " + str(temp))
+        logging.debug("temp len: " + str(len(temp)))
+        while len(temp)>0:
+            #pootemp = temp[0]
+            logging.debug("temp[0]: " + str(temp[0]) + "percentage: " + str(temp[0].get_percentage()))
+            try:
+                if temp[0] not in self.__threads__:
+                    #means that it got to 100 and it would have been removed.
+                    #so if its in local array but not in real array, must have been all good =]
+                    logging.debug("removed from temp because not in self.__threads__ anymore: " + str(temp[0]))
+                    temp.remove(temp[0])
+                
+                elif temp[0].get_percentage()<100:
+                    logging.debug("removed from temp: "+str(temp[0]))
+                    temp.remove(temp[0])
+            except:
+                logging.debug("\n\n***HOLY CRAP i think i gots the index out of range error***\n\n")
+                logging.debug("***except: temp: " + str(temp))
+                logging.debug("***except: temp len: " + str(len(temp)))
+                traceback.print_exc()
+                
+        self.__threads__.append(t)
+        t.start()
+        logging.debug("##OUTADD")
+#----------------------------------------------------------------------
+#apt-cache show pkgname to show filesize info plus other stuff
+class checkfilesize(Thread):
+    def __init__ (self,file):
+        Thread.__init__(self)
+        self.__stopped__=False
+        self.__file__ = file.replace(":","%3a") #replace colons if there are any
+        self.__percentage__=0
+        self.__dl_size__=0
+        self.__start_time__=time.time()
+        
+        self.__file_name__ = prefs.APT_ARCHIVE_PARTIAL_DIR + self.__file__
+        self.__installed_name__ = prefs.APT_ARCHIVE_DIR + self.__file__
+        self.__pkg_name__ = self.__file__[0:self.__file__.find('_')]        
+        
+    def run(self):
+        file_name=self.__file_name__
+        pkg_name=self.__pkg_name__
+        logging.debug(pkg_name+" just starting in run()")  
+        logging.debug(pkg_name+" installed_name: " + self.__installed_name__)
+        
+        total_size=get_current_size(pkg_name)
+
+        while (not os.path.isfile(file_name) and not self.__stopped__):
+            if os.path.isfile(self.__installed_name__):
+                logging.debug(pkg_name+" downloaded so fast couldn't be tracked! but we got it =D")
+                self.done()
+        #starting download
+        logging.debug(pkg_name+" starting download")
+        self.__start_time__=time.time()
+        while not self.__stopped__:
+            try:
+                s=os.stat(file_name)[stat.ST_SIZE]
+                self.__percentage__=(s*100)/total_size
+                self.__dl_size__=s
+                
+            except:
+                self.done()
+                
+    def done(self):
+        logging.debug(self.__pkg_name__ + "100% done?")
+        
+        self.__dl_size__=get_current_size(self.__pkg_name__)        
+        self.__percentage__=100
+        self.__stopped__=True
+        
+    def stop(self):
+        logging.debug(self.__pkg_name__+" stopping thread")
+        self.__stopped__=True
+    
+    def get_start_time(self):
+        return self.__start_time__
+        
+    def get_percentage(self):
+        return self.__percentage__
+        
+    def get_dl_size(self):#how much has been dl'ed
+        return self.__dl_size__
+        
+    def get_pkg_name(self):
+        return self.__pkg_name__
+#----------------------------------------------------------------------
+
+def cursor_up():
+    sys.stdout.write("\x1b[A")
+
+
+def filesize_to_string(num):
+    '''
+    Takes a file size in bytes and converts to
+    an easily readable format using 4 chars
+    examples: 
+    3766639 -> '3.6M'
+    31949 -> '31 K'
+    370186 -> '361K'
+    '''
+    out="0"
+    prefix="0"
+    
+    num=float(num)
+    #literal multiplication shown for clarity
+    if num<1000*1000: #if < 1mb (1,000,000B)
+        prefix="K"
+        num=num/(1024)
+    elif num<1000*1000*1000: #if < 1gb (1,000,000,000)
+        prefix="M"
+        num=num/(1024*1024)
+    else:
+        #num over 1gb? shouldn't happen >_>
+        prefix="G"
+        num=num/(1024*1024*1024)
+        
+    if num<10:
+        out=str(round(num,1))
+    elif num<100:
+        out=str(int(num)) + ' '
+    else:
+        out=str(int(num))
+        
+    #hack because of python's 'bad' rounding
+    #example: round(0.234,1)-> 0.20000000000000001
+    return out[0:3] + prefix
+
+
+def display_percentage(text,percentage,filesize,dlspeed):
+    '''
+    Displays a progress bar for downloads
+    
+    pkg_name  speed  dl_size  [*****]  percent
+    
+    
+    '''
+    (height, width) = terminal_size()
+    if percentage>100:
+        percentage=100
+    
+    
+    #speed: 8 with two spaces (12.3K/s)
+    speed=filesize_to_string(dlspeed) + '/s' + '  '
+    #size: 5 with space (12.3K )
+    size=filesize_to_string(filesize) + ' '
+    #percentage bar: 22
+    done_marks = int((percentage/100.0)*20)
+    percentage_bar = "[" + done_marks*"#" + (20-done_marks)*"-"+"]" + ' '
+    #percentage: 5
+    blank_digs = ""
+    if percentage<10:
+        blank_digs="  "
+    elif percentage<100:
+        blank_digs=" "
+    percent = blank_digs + str(percentage) + '%'
+    
+    
+    
+    
+    numblanks = width-40-len(text)
+    
+    output = '\r' + text+ numblanks*' ' + speed + size + percentage_bar + percent
+    logging.debug("display_percentage: output:" + output)
+    sys.stdout.write(output)
+    sys.stdout.flush()
+
+
+def kill_threads(threads):
+    for i in threads:
+        i.stop()
+
+def msg_bold(text):
+    print prefs.COL_HEADER+"\n\r"+text+prefs.COL_DEFAULT
+    
+def msg_tabbed(text):
+    print "\r\t"+text
+
+
+def parse_output(line,MODE):
+    ''' Parses output of post-installation and displays in prettier format
+    Also returns the current MODE'''
+    
+    if "is already the newest version." in line:
+        print "\n\r**"+line
+    elif line.startswith("Preconfiguring packages"):
+        if (MODE!=MODE_PRECONFIGURING):
+            msg_bold(line)
+            MODE = MODE_PRECONFIGURING
+    elif line.startswith("Selecting ") or line.startswith("Unpacking "):
+        if (MODE!=MODE_SELECTING):
+            msg_bold("Selecting and unpacking packages ...")
+            MODE = MODE_SELECTING
+        elif line.startswith("Unpacking "):
+            msg_tabbed(line)
+    elif line.startswith("Processing ") or line.startswith("Registering "):
+        if (MODE!=MODE_PROCESSING):
+            msg_bold("Processing ...")        
+            MODE = MODE_PROCESSING            
+        msg_tabbed(line)
+    elif line.startswith("Setting up"):        
+        if (MODE!=MODE_SETTING):
+            msg_bold("Setting up ...")
+            MODE = MODE_SETTING
+        msg_tabbed(line)
+    elif line.startswith("Removing"):
+        if (MODE!=MODE_REMOVING):
+            msg_bold("Removing ...")
+            MODE=MODE_REMOVING
+        msg_tabbed(line)        
+    elif MODE==MODE_SETTING and line.startswith("*"):
+        if '...' in line:
+            msg_tabbed(line[0:line.find('...')+3])
+        else:
+            msg_tabbed(line)
+    
+    #now return mode
+    return MODE
+    
+def done():
+    msg_bold("Done")
+    exit()
+
+def upgrade():
+    msg_bold("Upgrading packages")
+    install("",True)
+
+def remove(pkgs):
+    MODE=MODE_NONE
+    cmd=prefs.REMOVE_CMD + pkgs
+    
+    logging.debug("remove() cmd: "+cmd)
+    proc = subprocess.Popen(cmd,shell=True, bufsize=0,stdout=subprocess.PIPE)
+    
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:break
+            else:
+                line=line.strip()
+                logging.debug("remove() line:"+line)
+                
+                MODE=parse_output(line,MODE)
+    except:
+        traceback.print_exc()
+        logging.debug( "exiting...")
+        exit()
+    
+    msg_bold("Done")
+        
+        
+                
+def install(pkgs, isupgrade=False):    
+    MODE=MODE_NONE
+    if isupgrade:
+        cmd=prefs.UPGRADE_CMD
+    else:
+        cmd=prefs.INSTALL_CMD + pkgs
+    
+    logging.debug("install() cmd: "+cmd)
+    proc = subprocess.Popen(cmd,shell=True, bufsize=0,stdout=subprocess.PIPE)
+    stuff=[]
+    
+    threads=[] #i think ill put the check file size threads in here
+    
+    disp = displaythread()
+    disp.start()
+    
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:break
+            else:
+                line=line.strip()
+                #print line
+                logging.debug("install() line:"+line)
+                if line.startswith("Get:"):
+                    if (MODE!=MODE_DOWNLOADING):
+                        msg_bold("Downloading ...\n")
+                        MODE=MODE_DOWNLOADING
+                    
+                    pkgname = line.split()[3]
+                    filename=line.split()[3]+'_'+line.split()[4]+"_" + get_current_arch(pkgname)+".deb"                 
+                    
+                    logging.debug("about to create thread for "+pkgname)
+                    cfs=checkfilesize(filename)
+                    disp.add(cfs)
+                else:
+                    MODE=parse_output(line,MODE)
+
+                        
+    except:
+        traceback.print_exc()
+        kill_threads(threads)
+        logging.debug( "exiting...")
+        #os.kill(proc.pid, signal.SIGTERM)
+        #print "Killed proc subprocess :)!"
+        exit()
+        
+
+    logging.debug( "\nINSTALL DONE")
+    disp.stop()
+    
+    done()
+
+def lower_array(array):
+    temp=[]
+    for a in array:
+        temp.append(a.lower())
+    return temp
+    
+def should_show(name, desc, items, opts):
+   
+    if opts.name and (len(items)==1 or not opts.search_all_terms):
+        #if only searching for name and either:
+        #       only searching one term or
+        #       searching for ANY term
+        #always return true
+        return True
+
+    ''' 
+    Will add this feature later
+
+    if not prefs.CASE_SENSITIVE:
+        desc=desc.lower()
+        name=name.lower()'''
+
+
+    in_name_or_desc_counter=0
+    for it in items:
+        if it in name or it in desc:
+            in_name_or_desc_counter+=1
+    
+    if in_name_or_desc_counter==0: #return false if item is not in name or desc (probably in long description) - change this later to check prefs
+        return False
+    
+    #if 'all' terms must match, and pkg doesn't contain all terms (items), then return false - 
+    #this is only for when long description is disabled (default), otherwise apt-cache search takes care of it
+    if opts.search_all_terms and in_name_or_desc_counter<len(items): #change this later to check prefs
+        return False        
+        
+    return True
+            
+def show_search(items,opts):
+    
+    #check prefs - if case insensitive then:
+    items = lower_array(items)    
+    
+    logging.debug( "searching for " +str(items))
+    logging.debug("opts: " + str(opts))
+    
+    #set item as first, then for loop the rest (easy way to add \| at the ends of terms if necessary
+    item = items[0]    
+    
+    #check for quoted terms
+    if ' ' in items[0]:
+        item='"' + items[0] + '"'
+    
+    for i in items[1:]:
+        if ' ' in i:
+            #check for quoted terms
+            i = '"'+i+'"'
+        if opts.search_all_terms:
+            item += " " + i
+        else:
+            item += "\|" + i
+    
+    CMD_OPTS = ""
+    if opts.name:
+        CMD_OPTS="-n "
+    
+    cmd ="apt-cache search " + CMD_OPTS +item
+    logging.debug("cmd:"+cmd)
+    logging.debug("opts:"+str(opts))
+    logging.debug( "---------------------")
+    
+    proc = subprocess.Popen(cmd,shell=True, bufsize=0,stdout=subprocess.PIPE)    
+    
+    installed_packages=get_installed_packages()
+    
+    package_names=[] #store all output
+    
+    index=0; 
+    while True:
+        line = proc.stdout.readline().strip()
+        if not line: 
+            break
+            
+            
+        name = line[0:line.find(" - ")]
+        desc = line[line.find(" - ")+3:]
+        version = "(" + get_current_version(name) + ")"
+        
+        if should_show(name, desc, items, opts):
+            installed=""
+            if (name in installed_packages):
+                if get_current_version(name)!=installed_packages[name]:
+                    installed = "[INSTALLED]" + prefs.COL_INSTALLED_VERSION + "[" + installed_packages[name] + "]"
+                else:
+                    installed = "[INSTALLED]"
+            
+            firstline = ""+prefs.COL_NUMBER + str(index+1) + ')' + prefs.COL_DEFAULT +' ' + \
+                prefs.COL_PKGNAME + name + prefs.COL_DEFAULT + ' ' + \
+                prefs.COL_VERSION + version + ' ' + prefs.COL_DEFAULT + \
+                prefs.COL_INSTALLED + installed + prefs.COL_DEFAULT
+            secondline = ""+prefs.COL_DESCRIPTION+' ' + desc + prefs.COL_DEFAULT
+            
+            print firstline + '\n' + secondline
+            
+            package_names.append(name)  
+            
+            index+=1
+    return package_names
+
+
+def get_current_size(package):
+    cmd = "apt-cache show " + package
+    proc = subprocess.Popen(cmd,shell=True, stdout=subprocess.PIPE)
+    
+    output=proc.communicate()[0].split()
+    size=output[output.index("Size:")+1] #should do bounds checking sometime
+    #print "size:",size
+    return int(size)
+    
+def get_current_arch(package):
+    cmd = "apt-cache show " + package
+    proc = subprocess.Popen(cmd,shell=True, stdout=subprocess.PIPE)
+    
+    output=proc.communicate()[0].split()
+    arch=output[output.index("Architecture:")+1] #should do bounds checking sometime
+    return arch
+
+def get_current_version(package):
+    version="No Version Found!"
+    cmd = "apt-cache showpkg " + package
+    proc = subprocess.Popen(cmd,shell=True, stdout=subprocess.PIPE)
+    
+    output=proc.communicate()[0].split('\n')[2]
+    #example output:
+    #2.4.2-1 (/var/lib/apt/lists/archive.ubuntu.com_ubuntu_dists_jaunty_universe_binary-i386_Packages) (/var/lib/dpkg/status)   
+    #first instance of ' ' separates version number from everything else
+    version=output[0:output.find(' ')]
+    return version
+    
+    
+def get_installed_packages():
+    cmd = "dpkg -l"
+    packages={}
+    proc = subprocess.Popen(cmd,shell=True, bufsize=0,stdout=subprocess.PIPE)
+    while True:
+        line = proc.stdout.readline().strip()
+        if not line: break
+        else:
+            if line.split()[0]=="ii":
+                packages[line.split()[1]] = line.split()[2]
+    #print packages
+    return packages
+
+
+def default_search(items,opts):
+    #do the installing packages here, 1,2,3-6, etc
+    package_names=show_search(items,opts)
+    
+    if len(package_names)==0:
+        print "No packages found."
+        exit()
+        
+    print prefs.COL_ARROW+"==> " + prefs.COL_DEFAULT+"Enter numbers or ranges separated by spaces"
+    
+    try:
+        input=raw_input(prefs.COL_ARROW+"==> "+prefs.COL_DEFAULT).split()
+    except:
+        print "\nKeyboard Interrupt? Goodbye!"
+        exit()
+        
+    nums=[]
+    for i in input:
+        if i.isdigit():
+            nums.append(int(i))
+        elif i.find('-')>0:
+            numrange = [i[0:i.find('-')], i[i.find('-')+1:]]
+            if numrange[0].isdigit() and numrange[1].isdigit():
+                start=int(numrange[0])
+                end=int(numrange[1])
+                if end<start:
+                    print "learn your numbers in order, silly"
+                    temp=start
+                    start=end
+                    end=temp
+                
+                for j in range(start,end+1):
+                    nums.append(j)
+        else:
+            print "ERROR input, ignoring..."
+            
+    
+    
+    #remove duplicates
+    nums = list(set(nums))
+    
+    pkgs = ""
+    for n in nums:
+        if n<1 or n>len(package_names):
+            print str(n) + " is not valid, ignoring..."
+        else:
+            pkgs += package_names[n-1] + " " #need the -1 since array indexes start at 0, not 1
+    pkgs=pkgs.strip()
+    if pkgs=="":
+        print "No packages selected"
+        exit()
+    
+    print "Installing: " + pkgs
+    
+    input=raw_input("Proceed with installation? [Y/n]")
+    if input!='' and input[0].lower()!='y':
+        exit()
+    
+    
+    install(pkgs)
+
+
+def terminal_size(): 
+    '''
+    Returns height, width
+    '''
+    (height,width) = os.popen('stty size', 'r').read().split()
+    return int(height),int(width)
+
+
+if __name__ == '__main__':
+    logging.basicConfig(filename=LOG_FILENAME,level=logging.DEBUG,filemode='w')
+    logging.debug("\n\n==STARTING LOG==")
+
+    main()
+    
+    logging.debug("\n==ENDING LOG==")
