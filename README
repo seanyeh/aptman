@@ -1,0 +1,17 @@
+Aptman is a simple wrapper (visual hack) for Debian's Advanced Packaging Tool 
+featuring visually attractive output and an interactive mode, inspired by the 
+Pacman package manager and Yaourt front-end from the Arch Linux distribution.
+
+Features:
+  * Easy package searching with interactive search mode (inspired by yaourt)
+  * Simple installing and removing programs, as well as system upgrade
+  * Clean and colorful output
+  * (Somewhat) configurable with config file ~/.aptman/prefs.py
+
+Installation:
+  * Download and extract the aptman script
+  * chmod +x aptman and put it in your preferred bin directory
+
+Visit the wiki for details: http://wiki.github.com/snoblo/aptman/
+
+Enjoy!
