@@ -142,12 +142,12 @@ PREFS_DIR = os.path.expanduser('~/.aptman')
 if not os.path.isdir(PREFS_DIR):
     print FIRST_RUN_MESSAGE
     os.mkdir(PREFS_DIR)
-    exit()
 if not os.path.isfile(PREFS_DIR+"/prefs.py"):
     print "Could not find prefs.py. Created default config file"
     f = open(PREFS_DIR+"/prefs.py", 'w')
     f.write(DEFAULT_PREFS)
     f.close()
+    exit()
     
 sys.path.append(PREFS_DIR)
 import prefs
