@@ -123,7 +123,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.'''
 
 FIRST_RUN_MESSAGE = '''
 Config directory not found - assuming this is the first run.
-Because aptman defaults to DEBIAN_FRONTEND ="gnome" for the 
+Because aptman defaults to DEBIAN_FRONTEND = "gnome" for the 
 occasional debconf configuration of certain packages, it is 
 recommended to make sure "libgnome2-perl" is installed. See
 the config file for more details.
