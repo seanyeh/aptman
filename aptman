@@ -44,11 +44,11 @@ APT_ARCHIVE_PARTIAL_DIR = "/var/cache/apt/archives/partial/"
 # Choose the frontend for debconf, which may be called
 # upon when installing certain packages.
 #
-# Aptman (so far) only works with "gnome", "kde", or "noninteractive"
+# Aptman works well with "gnome", "kde", or "noninteractive".
 # "editor" may also work if your system's default editor has a GUI.
 # If running without X, use "noninteractive"
 # See the debconf manpages for details.
-DEBIAN_FRONTEND_ENV = 'sudo env DEBIAN_FRONTEND="gnome"'
+DEBIAN_FRONTEND_ENV = 'sudo -E DEBIAN_FRONTEND="gnome"'
 
 #Install/Remove commands
 #Do not need sudo because sudo is already part of DEBIAN_FRONTEND_ENV
@@ -100,8 +100,8 @@ inspired by the Pacman package manager and Yaourt front-end
 from the Arch Linux distribution.'''
 
 APTMAN_VERSION = '''
-aptman - version 0.1.0
-Copyright (C) 2009  Sean Yeh <snoblo AT archlinux DOT us>
+aptman - version 0.1.1
+Copyright (C) 2009-2010  Sean Yeh <snoblo AT archlinux DOT us>
 This program comes with ABSOLUTELY NO WARRANTY; for details
 use option --license. This is free software, and you are welcome 
 to redistribute it under certain conditions.'''
@@ -123,10 +123,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.'''
 
 FIRST_RUN_MESSAGE = '''
 Config directory not found - assuming this is the first run.
-Before using aptman, make sure to run: sudo visudo
-    and add this line (replacing USER with your username):
-    USER ALL=(ALL) NOPASSWD: /usr/bin/apt-get,/usr/bin/env
-Alternatively, you can simply run aptman with root privileges.
+Because aptman defaults to DEBIAN_FRONTEND ="gnome" for the 
+occasional debconf configuration of certain packages, it is 
+recommended to make sure "libgnome2-perl" is installed. See
+the config file for more details.
 
 Now creating config file prefs.py in ~/.aptman
 '''
@@ -142,6 +142,7 @@ PREFS_DIR = os.path.expanduser('~/.aptman')
 if not os.path.isdir(PREFS_DIR):
     print FIRST_RUN_MESSAGE
     os.mkdir(PREFS_DIR)
+    exit()
 if not os.path.isfile(PREFS_DIR+"/prefs.py"):
     print "Could not find prefs.py. Created default config file"
     f = open(PREFS_DIR+"/prefs.py", 'w')
