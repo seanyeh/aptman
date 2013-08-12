@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python
 # 
 # aptman -- a simple wrapper for Debian's Advanced Packaging Tool
@@ -48,7 +47,7 @@ APT_ARCHIVE_PARTIAL_DIR = "/var/cache/apt/archives/partial/"
 # "editor" may also work if your system's default editor has a GUI.
 # If running without X, use "noninteractive"
 # See the debconf manpages for details.
-DEBIAN_FRONTEND_ENV = 'sudo -E DEBIAN_FRONTEND="gnome"'
+DEBIAN_FRONTEND_ENV = 'sudo -E DEBIAN_FRONTEND="noninteractive"'
 
 #Install/Remove commands
 #Do not need sudo because sudo is already part of DEBIAN_FRONTEND_ENV
@@ -354,6 +353,7 @@ class checkfilesize(Thread):
         while not self.__stopped__:
             try:
                 s=os.stat(file_name)[stat.ST_SIZE]
+                logging.debug(pkg_name+ " downloaded size: " + s)
                 self.__percentage__=(s*100)/total_size
                 self.__dl_size__=s
                 
@@ -578,7 +578,7 @@ def install(pkgs, isupgrade=False):
                         MODE=MODE_DOWNLOADING
                     
                     pkgname = line.split()[3]
-                    filename=line.split()[3]+'_'+line.split()[4]+"_" + get_current_arch(pkgname)+".deb"                 
+                    filename=line.split()[3]+'_'+line.split()[5]+"_" + get_current_arch(pkgname)+".deb"                 
                     
                     logging.debug("about to create thread for "+pkgname)
                     cfs=checkfilesize(filename)
